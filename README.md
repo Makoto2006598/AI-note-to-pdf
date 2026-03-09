@@ -3,7 +3,7 @@
 > 将含有 LaTeX 公式的理工科笔记，一键转换为排版精美的 HTML 笔记，支持打印为 PDF。
 > 同时提供 **PDF 教材总结**功能，上传教材后 AI 自动提取知识点、公式与大纲。
 
-**在线体验：** [notes-pdf.pages.dev](https://notes-pdf.pages.dev)
+**在线体验：** [notes-pdf.pages.dev]
 
 ---
 
