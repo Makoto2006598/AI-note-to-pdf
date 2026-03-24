@@ -1,261 +1,255 @@
 /**
- * Cloudflare Worker — AI 笔记转 PDF 代理
+ * 📌 笔记转换 API 代理 · Cloudflare Worker
  *
- * 支持的 AI 提供商：
- *   - groq    : Groq API（默认，免费额度充足）
- *   - ollama  : 本地 Ollama（需在 wrangler.toml 配置 OLLAMA_URL）
+ * 功能：
+ *  1. 代理前端对各 AI 的请求，Key 存在服务端，用户不可见
+ *  2. 基于 IP 的滑动窗口限流（默认：每 IP 每小时 20 次）
+ *  3. 统一错误处理与 CORS
  *
- * 环境变量（通过 wrangler secret put 设置）：
- *   GROQ_API_KEY   : Groq API Key（gsk_...）
- *   OLLAMA_URL     : Ollama 地址，如 http://192.168.1.100:11434（本地部署时用）
+ * 环境变量（在 Cloudflare 面板 → Workers → Settings → Variables 里配置）：
+ *  GROQ_API_KEY     = gsk_...        ← 免费，推荐首选
+ *  CLAUDE_API_KEY   = sk-ant-...
+ *  DEEPSEEK_API_KEY = sk-...
+ *  QWEN_API_KEY     = sk-...
+ *  GLM_API_KEY      = xxxxx.xxxxx
+ *  KIMI_API_KEY     = sk-...
  *
- * KV 命名空间（可选，用于限流）：
- *   RATE_LIMIT_KV
+ * KV 命名空间（用于限流，可选但推荐）：
+ *  RATE_LIMIT_KV    → 绑定名称 RATE_LIMIT_KV
  */
 
+// ─── 限流配置 ────────────────────────────────────────────────────────────────
 const RATE_LIMIT = {
-  maxRequests: 20,
-  windowSecs: 3600,
+  maxRequests: 20,      // 每个 IP 最多请求次数
+  windowSecs:  3600,    // 时间窗口（秒），3600 = 1 小时
 };
 
-// ─── 系统提示词 ───────────────────────────────────────────────────────────────
+// ─── 各提供商的 API 配置 ──────────────────────────────────────────────────────
+const PROVIDER_CONFIG = {
+  groq: {
+    endpoint: "https://api.groq.com/openai/v1/chat/completions",
+    format:   "openai",
+    getKey:   (env) => env.GROQ_API_KEY,
+  },
+  claude: {
+    endpoint: "https://api.anthropic.com/v1/messages",
+    format:   "anthropic",
+    getKey:   (env) => env.CLAUDE_API_KEY,
+  },
+  deepseek: {
+    endpoint: "https://api.deepseek.com/v1/chat/completions",
+    format:   "openai",
+    getKey:   (env) => env.DEEPSEEK_API_KEY,
+  },
+  qwen: {
+    endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+    format:   "openai",
+    getKey:   (env) => env.QWEN_API_KEY,
+  },
+  glm: {
+    endpoint: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+    format:   "openai",
+    getKey:   (env) => env.GLM_API_KEY,
+  },
+  kimi: {
+    endpoint: "https://api.moonshot.cn/v1/chat/completions",
+    format:   "openai",
+    getKey:   (env) => env.KIMI_API_KEY,
+  },
+};
 
-function buildConvertPrompt(options = {}) {
-  const detail = options.detail || "medium";
-  const emphasisBox = options.emphasisBox !== false;
-  const showExamples = options.showExamples !== false;
-  const formulaStyle = options.formulaStyle || "display";
+const SYSTEM_PROMPT = `你是一位精通学科笔记排版的专家，擅长物理、数学、化学等理工科内容。
+用户会发给你一段含有 LaTeX 公式的笔记文本（公式用 \\vec{}, \\frac{} 等 LaTeX 语法书写）。
 
-  const detailMap = {
-    detailed: "尽量详细，展开每个知识点，加入推导步骤",
-    medium: "适中详细，保留核心推导，省略繁琐步骤",
-    concise: "简洁扼要，只保留结论和关键公式",
+你的任务：将笔记转换为结构清晰、视觉美观的 HTML 笔记。
+
+输出格式规则（严格遵守）：
+1. 只输出 HTML 片段（不要包含 <html><body> 等外层标签，不要包含 markdown 代码块标记）
+2. 行内公式用 $...$ 包裹，块级公式用 $$...$$ 包裹
+3. 使用以下 class 进行语义标注：
+   - <h2 class="note-section"> 大章节标题
+   - <h3 class="note-subsection"> 小节标题
+   - <div class="note-highlight"> 重要概念框
+   - <div class="note-warning"> 易错点警告框
+   - <div class="note-example"> 例题框
+   - <div class="note-summary"> 总结框
+   - <div class="note-step"> 步骤（需含 <span class="step-num">步骤N</span>）
+   - <div class="note-answer"> 最终答案（含 \\boxed{}）
+   - <p> 普通段落，<ul><li> 列表，<strong> 强调词
+4. 表格用 <table class="note-table"><thead><tbody> 结构
+5. 不要输出任何解释，直接输出 HTML`;
+
+// ─── CORS 头 ──────────────────────────────────────────────────────────────────
+function corsHeaders() {
+  return {
+    "Access-Control-Allow-Origin":  "*",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
   };
-
-  return `你是一位专业的理工科笔记排版助手。请将用户的笔记原文转换为结构清晰、排版精美的 HTML 格式笔记。
-
-## 输出要求
-
-1. **格式**：输出纯 HTML 片段（不含 <html>/<head>/<body> 标签），使用内联样式
-2. **数学公式**：使用 LaTeX 语法，行内公式用 $...$，独立公式用 $$...$$
-3. **结构**：用 <h2>/<h3> 划分章节，<p> 写正文，<ul>/<ol> 写列表
-4. **详细程度**：${detailMap[detail] || detailMap.medium}
-${
-  emphasisBox
-    ? `5. **重点框**：对关键定理/公式用以下样式包裹：
-   <div style="border-left:4px solid #3b82f6;background:#eff6ff;padding:12px 16px;margin:12px 0;border-radius:0 8px 8px 0"><strong>重点</strong>：...内容...</div>`
-    : ""
-}
-${
-  showExamples
-    ? `6. **例题**：若笔记中有例题，用以下样式：
-   <div style="background:#f0fdf4;border:1px solid #86efac;padding:12px 16px;margin:12px 0;border-radius:8px"><strong>例题</strong>：...题目...<br><strong>解</strong>：...解答...</div>`
-    : ""
-}
-${formulaStyle === "display" ? "7. 重要公式单独一行使用 $$...$$" : "7. 公式尽量使用行内 $...$"}
-
-## 注意
-- 保持原文的所有数学内容，不得遗漏公式
-- 不要输出 markdown，只输出 HTML
-- 不要加任何说明文字，直接输出 HTML 内容`;
 }
 
-function buildSummarizePrompt(options = {}) {
-  const types = options.types || ["知识点提炼"];
-  const detail = options.detail || "medium";
-
-  const detailMap = {
-    detailed: "详细，包含推导和解释",
-    medium: "适中，保留核心内容",
-    concise: "简洁，只列要点",
-  };
-
-  return `你是一位专业的理工科教材总结助手。请根据提供的教材/讲义文本，生成结构化总结。
-
-## 总结类型
-请生成以下类型的总结：${types.join("、")}
-
-## 详细程度
-${detailMap[detail] || detailMap.medium}
-
-## 输出格式
-输出纯 HTML 片段，使用内联样式。数学公式使用 LaTeX：行内 $...$，独立 $$...$$。
-重点公式用蓝色左边框：
-<div style="border-left:4px solid #3b82f6;background:#eff6ff;padding:10px 14px;margin:8px 0;border-radius:0 6px 6px 0">公式内容</div>
-
-只输出 HTML，不要输出 markdown 或说明文字。`;
+function jsonResp(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "Content-Type": "application/json", ...corsHeaders() },
+  });
 }
 
-// ─── 限流 ─────────────────────────────────────────────────────────────────────
+// ─── 限流检查 ─────────────────────────────────────────────────────────────────
+async function checkRateLimit(ip, env) {
+  // 没有绑定 KV 时跳过限流（开发阶段用）
+  if (!env.RATE_LIMIT_KV) return { allowed: true };
 
-async function checkRateLimit(ip, kv) {
-  if (!kv) return true;
-  const key = `rl:${ip}`;
-  const now = Math.floor(Date.now() / 1000);
-  const windowStart = now - RATE_LIMIT.windowSecs;
+  const key       = `rl:${ip}`;
+  const nowSecs   = Math.floor(Date.now() / 1000);
+  const windowKey = Math.floor(nowSecs / RATE_LIMIT.windowSecs); // 当前窗口编号
+  const kvKey     = `${key}:${windowKey}`;
 
-  let record;
-  try {
-    record = JSON.parse((await kv.get(key)) || "null");
-  } catch {
-    record = null;
+  // 取当前计数
+  const raw   = await env.RATE_LIMIT_KV.get(kvKey);
+  const count = raw ? parseInt(raw) : 0;
+
+  if (count >= RATE_LIMIT.maxRequests) {
+    const resetAt = (windowKey + 1) * RATE_LIMIT.windowSecs;
+    return {
+      allowed:   false,
+      remaining: 0,
+      resetIn:   resetAt - nowSecs,
+    };
   }
 
-  if (!record || record.windowStart < windowStart) {
-    record = { windowStart: now, count: 1 };
+  // 递增，TTL = 窗口时长 + 5s 缓冲
+  await env.RATE_LIMIT_KV.put(kvKey, String(count + 1), {
+    expirationTtl: RATE_LIMIT.windowSecs + 5,
+  });
+
+  return {
+    allowed:   true,
+    remaining: RATE_LIMIT.maxRequests - count - 1,
+  };
+}
+
+// ─── 调用 AI API ──────────────────────────────────────────────────────────────
+async function callAI(providerId, modelId, userText, env) {
+  const cfg = PROVIDER_CONFIG[providerId];
+  if (!cfg) throw { status: 400, message: `未知提供商：${providerId}` };
+
+  const apiKey = cfg.getKey(env);
+  if (!apiKey) throw { status: 503, message: `${providerId} API Key 未配置，请联系管理员` };
+
+  let body, headers;
+
+  if (cfg.format === "anthropic") {
+    headers = {
+      "Content-Type":      "application/json",
+      "x-api-key":         apiKey,
+      "anthropic-version": "2023-06-01",
+    };
+    body = JSON.stringify({
+      model:      modelId,
+      max_tokens: 4096,
+      system:     SYSTEM_PROMPT,
+      messages:   [{ role: "user", content: userText }],
+    });
   } else {
-    record.count += 1;
-  }
-
-  if (record.count > RATE_LIMIT.maxRequests) return false;
-
-  await kv.put(key, JSON.stringify(record), {
-    expirationTtl: RATE_LIMIT.windowSecs * 2,
-  });
-  return true;
-}
-
-// ─── Provider 调用 ────────────────────────────────────────────────────────────
-
-async function callGroq(systemPrompt, userText, model, apiKey) {
-  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: model || "llama-3.3-70b-versatile",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userText },
+    // OpenAI 兼容格式（DeepSeek / 通义 / GLM / Kimi）
+    headers = {
+      "Content-Type":  "application/json",
+      "Authorization": `Bearer ${apiKey}`,
+    };
+    body = JSON.stringify({
+      model:      modelId,
+      max_tokens: 4096,
+      messages:   [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user",   content: userText },
       ],
-      max_tokens: 8192,
-      temperature: 0.3,
-    }),
-  });
-
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Groq API 错误 (${response.status}): ${err.slice(0, 200)}`);
+    });
   }
 
-  const data = await response.json();
-  return data.choices?.[0]?.message?.content || "";
-}
+  const resp = await fetch(cfg.endpoint, { method: "POST", headers, body });
 
-async function callOllama(systemPrompt, userText, model, ollamaUrl) {
-  const url = `${ollamaUrl.replace(/\/$/, "")}/v1/chat/completions`;
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: model,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userText },
-      ],
-      stream: false,
-    }),
-  });
-
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Ollama 错误 (${response.status}): ${err.slice(0, 200)}`);
+  if (!resp.ok) {
+    let detail = "";
+    try { const d = await resp.json(); detail = d.error?.message || ""; } catch {}
+    if (resp.status === 429) throw { status: 429, message: "AI 服务繁忙，请稍后重试" };
+    if (resp.status === 401) throw { status: 401, message: `${providerId} API Key 无效` };
+    if (resp.status === 402) throw { status: 402, message: `${providerId} 账户余额不足` };
+    throw { status: resp.status, message: `AI 请求失败（${resp.status}）${detail ? "：" + detail : ""}` };
   }
 
-  const data = await response.json();
-  return data.choices?.[0]?.message?.content || "";
+  const data = await resp.json();
+  let text = "";
+  if (cfg.format === "anthropic") {
+    text = data.content?.find(b => b.type === "text")?.text || "";
+  } else {
+    text = data.choices?.[0]?.message?.content || "";
+  }
+
+  // 清除部分模型可能返回的 markdown 代码块标记
+  return text.replace(/^```html\n?/i, "").replace(/\n?```$/i, "").trim();
 }
 
-// ─── Worker 主入口 ────────────────────────────────────────────────────────────
-
+// ─── Worker 入口 ──────────────────────────────────────────────────────────────
 export default {
   async fetch(request, env) {
+    // 最外层兜底：确保任何情况都返回 JSON，不会出现空响应
+    try {
+      return await handleRequest(request, env);
+    } catch (e) {
+      console.error("Unhandled error:", e);
+      return jsonResp({ error: "服务器内部错误，请稍后重试" }, 500);
+    }
+  },
+};
+
+async function handleRequest(request, env) {
     const url = new URL(request.url);
-    const corsHeaders = {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
-    };
 
+    // OPTIONS 预检
     if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: corsHeaders });
+      return new Response(null, { status: 204, headers: corsHeaders() });
     }
 
-    if (request.method !== "POST" || url.pathname !== "/api/convert") {
-      return new Response("Not Found", { status: 404, headers: corsHeaders });
+    // 只接受 POST /api/convert
+    if (url.pathname !== "/api/convert" || request.method !== "POST") {
+      return jsonResp({ error: "Not Found" }, 404);
     }
 
-    // 限流检查
-    const ip =
-      request.headers.get("CF-Connecting-IP") ||
-      request.headers.get("X-Forwarded-For") ||
-      "unknown";
-    const allowed = await checkRateLimit(ip, env.RATE_LIMIT_KV);
-    if (!allowed) {
-      return new Response(
-        JSON.stringify({
-          error: `请求过于频繁，每小时最多 ${RATE_LIMIT.maxRequests} 次`,
-        }),
-        { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
+    // ── 解析请求体 ──
     let payload;
     try {
       payload = await request.json();
     } catch {
-      return new Response(JSON.stringify({ error: "请求体 JSON 格式错误" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return jsonResp({ error: "请求体必须是 JSON" }, 400);
     }
 
-    const { provider = "groq", model, text, type = "convert", options = {} } = payload;
-
-    if (!text || typeof text !== "string") {
-      return new Response(JSON.stringify({ error: "缺少 text 字段" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+    const { provider, model, text } = payload;
+    if (!provider || !model || !text?.trim()) {
+      return jsonResp({ error: "缺少必填字段：provider / model / text" }, 400);
+    }
+    if (text.length > 8000) {
+      return jsonResp({ error: "笔记内容超出长度限制（最多 8000 字符），请分段处理" }, 413);
     }
 
-    const systemPrompt =
-      type === "summarize"
-        ? buildSummarizePrompt(options)
-        : buildConvertPrompt(options);
+    // ── 限流检查 ──
+    const ip     = request.headers.get("CF-Connecting-IP") || "unknown";
+    const rLimit = await checkRateLimit(ip, env);
+    if (!rLimit.allowed) {
+      const mins = Math.ceil(rLimit.resetIn / 60);
+      return jsonResp(
+        { error: `请求过于频繁，请 ${mins} 分钟后再试（每小时限 ${RATE_LIMIT.maxRequests} 次）` },
+        429
+      );
+    }
 
+    // ── 调用 AI ──
     try {
-      let result;
-
-      if (provider === "ollama") {
-        const ollamaUrl = env.OLLAMA_URL;
-        if (!ollamaUrl) throw new Error("未配置 OLLAMA_URL 环境变量");
-        result = await callOllama(systemPrompt, text, model || "qwen2.5:14b", ollamaUrl);
-      } else {
-        // 默认 groq
-        const apiKey = env.GROQ_API_KEY;
-        if (!apiKey) throw new Error("未配置 GROQ_API_KEY 环境变量");
-        result = await callGroq(systemPrompt, text, model, apiKey);
-      }
-
-      // 清理 markdown 代码块
-      const html = result
-        .replace(/^```html\s*/i, "")
-        .replace(/^```\s*/i, "")
-        .replace(/\s*```$/i, "")
-        .trim();
-
-      return new Response(JSON.stringify({ html }), {
-        status: 200,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    } catch (err) {
-      return new Response(JSON.stringify({ error: err.message }), {
-        status: 500,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      const html = await callAI(provider, model, text, env);
+      return jsonResp({ html, remaining: rLimit.remaining });
+    } catch (e) {
+      const status  = typeof e.status === "number" ? e.status : 500;
+      const message = typeof e.message === "string" ? e.message : "服务器内部错误，请稍后重试";
+      return jsonResp({ error: message }, status);
     }
-  },
-};
+}
