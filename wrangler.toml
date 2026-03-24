@@ -1,0 +1,14 @@
+name = "notes-ai-proxy"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+# ─── KV 限流（可选）─────────────────────────────────────────────────────────────
+# 取消下面两行注释，并填入 KV namespace ID（运行 wrangler kv namespace create RATE_LIMIT_KV 获取）
+# [[kv_namespaces]]
+# binding = "RATE_LIMIT_KV"
+# id = "你的KV_namespace_id_填这里"
+
+# ─── 本地开发变量（写入 .dev.vars 文件，不要提交到 git）────────────────────────
+# .dev.vars 示例内容：
+#   GROQ_API_KEY=gsk_...
+#   OLLAMA_URL=http://localhost:11434
