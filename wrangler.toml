@@ -1,14 +1,21 @@
-name = "notes-ai-proxy"
-main = "worker.js"
+# wrangler.toml · Cloudflare Workers 配置文件
+# 部署命令：npx wrangler deploy
+
+name = "notes-ai-proxy"          # Worker 名称（可自定义）
+main = "worker.js"               # 入口文件
 compatibility_date = "2024-01-01"
 
-# ─── KV 限流（可选）─────────────────────────────────────────────────────────────
-# 取消下面两行注释，并填入 KV namespace ID（运行 wrangler kv namespace create RATE_LIMIT_KV 获取）
-# [[kv_namespaces]]
-# binding = "RATE_LIMIT_KV"
-# id = "你的KV_namespace_id_填这里"
+# ── KV 命名空间（用于限流）──────────────────────────────────────────────────
+# 部署前需先创建：npx wrangler kv namespace create RATE_LIMIT_KV
+# 然后把下面的 id 换成输出的真实 ID
+[[kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id      = "c6fa2a355da6453bbcf279ed4e2256be"
 
-# ─── 本地开发变量（写入 .dev.vars 文件，不要提交到 git）────────────────────────
-# .dev.vars 示例内容：
-#   GROQ_API_KEY=gsk_...
-#   OLLAMA_URL=http://localhost:11434
+# ── 环境变量（敏感 Key 请用 wrangler secret 命令设置，不要写在这里）────────
+# 运行以下命令逐一设置：
+#   npx wrangler secret put CLAUDE_API_KEY
+#   npx wrangler secret put DEEPSEEK_API_KEY
+#   npx wrangler secret put QWEN_API_KEY
+#   npx wrangler secret put GLM_API_KEY
+#   npx wrangler secret put KIMI_API_KEY
