@@ -17,6 +17,47 @@ const PROVIDERS = {
     ],
     defaultModel: "llama-3.3-70b-versatile",
   },
+  claude: {
+    id: "claude", name: "Claude", flag: "🧠", color: "#a78bfa",
+    models: [
+      { id: "claude-sonnet-4-6",          name: "Claude Sonnet 4.6" },
+      { id: "claude-haiku-4-5-20251001",  name: "Claude Haiku 4.5（快速）" },
+    ],
+    defaultModel: "claude-sonnet-4-6",
+  },
+  deepseek: {
+    id: "deepseek", name: "DeepSeek", flag: "🔍", color: "#38bdf8",
+    models: [
+      { id: "deepseek-chat",     name: "DeepSeek Chat" },
+      { id: "deepseek-reasoner", name: "DeepSeek Reasoner" },
+    ],
+    defaultModel: "deepseek-chat",
+  },
+  qwen: {
+    id: "qwen", name: "通义", flag: "🌊", color: "#34d399",
+    models: [
+      { id: "qwen-max",   name: "Qwen Max" },
+      { id: "qwen-plus",  name: "Qwen Plus" },
+      { id: "qwen-turbo", name: "Qwen Turbo（快速）" },
+    ],
+    defaultModel: "qwen-max",
+  },
+  glm: {
+    id: "glm", name: "智谱", flag: "✦", color: "#fb7185",
+    models: [
+      { id: "glm-4",       name: "GLM-4" },
+      { id: "glm-4-flash", name: "GLM-4 Flash（快速）" },
+    ],
+    defaultModel: "glm-4",
+  },
+  kimi: {
+    id: "kimi", name: "Kimi", flag: "🌙", color: "#fbbf24",
+    models: [
+      { id: "moonshot-v1-32k",  name: "Moonshot 32k" },
+      { id: "moonshot-v1-128k", name: "Moonshot 128k" },
+    ],
+    defaultModel: "moonshot-v1-32k",
+  },
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -240,7 +281,7 @@ export default function App() {
   // ── 笔记转换状态 ──
   const [activeTemplate, setActiveTemplate] = useState("physics");
   const [input, setInput]               = useState(DEMO_TEMPLATES.physics.text);
-  const [providerId]                    = useState("groq");
+  const [providerId, setProviderId]     = useState("groq");
   const [modelId, setModelId]           = useState(PROVIDERS.groq.defaultModel);
   const [html, setHtml]                 = useState("");
   const [printHtml, setPrintHtml]       = useState("");
@@ -274,30 +315,40 @@ export default function App() {
     };
     addStyle("note-preview-styles", PREVIEW_CSS);
     addStyle("note-print-styles",   PRINT_CSS);
-    loadScript(DOMPURIFY_JS).then(() => setPurifyReady(true)).catch(()=>{});
-    loadScript(KATEX_JS).then(() => loadScript(KATEX_AUTO)).then(() => setKatexReady(true));
-    loadScript(PDFJS_JS).then(() => setPdfJsReady(true)).catch(()=>{});
+    loadScript(DOMPURIFY_JS).then(() => setPurifyReady(true)).catch(() => {
+      console.warn("DOMPurify 加载失败，HTML 将不经过净化直接渲染");
+    });
+    loadScript(KATEX_JS).then(() => loadScript(KATEX_AUTO)).then(() => setKatexReady(true)).catch(() => {
+      console.warn("KaTeX 加载失败，数学公式将无法渲染");
+    });
+    loadScript(PDFJS_JS).then(() => setPdfJsReady(true)).catch(() => {
+      setSummaryErr("PDF 解析器加载失败，请检查网络连接后刷新页面");
+    });
     return () => abortRef.current?.abort();
+  }, []);
+
+  // ── HTML 净化辅助 ──
+  const sanitize = useCallback((raw) => {
+    if (window.DOMPurify) {
+      return window.DOMPurify.sanitize(raw, {
+        ADD_TAGS: ["math","semantics","mrow","mi","mo","mn","mfrac","msup","msub","mtext","annotation"],
+        ADD_ATTR: ["class","style","aria-hidden","focusable","role","xmlns"],
+      });
+    }
+    return raw; // DOMPurify 未加载时回退（内容来自自有后端，风险可控）
   }, []);
 
   // ── KaTeX 渲染 ──
   useEffect(() => {
     if (!katexReady || !html || !previewRef.current) return;
     const el = previewRef.current;
-    let safe = html;
-    if (purifyReady && window.DOMPurify) {
-      safe = window.DOMPurify.sanitize(html, {
-        ADD_TAGS: ["math","semantics","mrow","mi","mo","mn","mfrac","msup","msub","mtext","annotation"],
-        ADD_ATTR: ["class","style","aria-hidden","focusable","role","xmlns"],
-      });
-    }
-    el.innerHTML = safe;
+    el.innerHTML = sanitize(html);
     window.renderMathInElement?.(el, {
       delimiters:[{left:"$$",right:"$$",display:true},{left:"$",right:"$",display:false}],
       throwOnError:false,
     });
     setPrintHtml(el.innerHTML);
-  }, [html, katexReady, purifyReady]);
+  }, [html, katexReady, sanitize]);
 
   // ── 切换模板（自动清空预览）──
   const handleTemplate = useCallback((key) => {
@@ -491,7 +542,7 @@ export default function App() {
               {Object.values(PROVIDERS).map(p => {
                 const active = providerId === p.id;
                 return (
-                  <button key={p.id} className="chip-btn" style={{
+                  <button key={p.id} className="chip-btn" onClick={() => { setProviderId(p.id); setModelId(p.defaultModel); }} style={{
                     padding:"5px 13px", borderRadius:8, cursor:"pointer", fontSize:12,
                     fontFamily:"'Noto Sans SC',sans-serif", fontWeight:active?700:500, transition:"all 0.15s",
                     background: active ? `${p.color}28` : "rgba(255,255,255,0.04)",
@@ -676,7 +727,7 @@ export default function App() {
                   )}
                   {summaryResult && (
                     <div style={{ padding:"18px 20px", color:"rgba(255,255,255,0.8)", fontSize:13, lineHeight:1.85, fontFamily:"'Noto Serif SC',Georgia,serif", whiteSpace:"pre-wrap" }}
-                         dangerouslySetInnerHTML={{ __html: summaryResult.trim().startsWith("<") ? summaryResult : summaryResult.replace(/\n/g,"<br/>") }} />
+                         dangerouslySetInnerHTML={{ __html: sanitize(summaryResult.trim().startsWith("<") ? summaryResult : summaryResult.replace(/\n/g,"<br/>")) }} />
                   )}
                 </div>
 

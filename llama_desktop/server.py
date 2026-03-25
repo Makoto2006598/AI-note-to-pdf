@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 import threading
-from typing import Optional
+from typing import Any, Optional
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from model_manager import manager
-from prompts import SYSTEM_PROMPT
+from prompts import SYSTEM_PROMPT, build_convert_prompt, build_summarize_prompt
 
 app = FastAPI(title="llama-desktop proxy")
 
@@ -42,6 +42,10 @@ class ConvertRequest(BaseModel):
     provider: str = "local"
     model:    str = "local"
     text:     str
+    type:     Optional[str] = "convert"
+    options:  Optional[dict[str, Any]] = None
+
+    model_config = {"populate_by_name": True}
 
 
 class LoadRequest(BaseModel):
@@ -107,8 +111,12 @@ async def convert(req: ConvertRequest):
         )
 
     try:
+        if req.type == "summarize":
+            system_prompt = build_summarize_prompt(req.options)
+        else:
+            system_prompt = build_convert_prompt(req.options)
         raw = manager.generate(
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             user_text=text,
         )
         # 清除部分模型返回的 markdown 代码块标记
