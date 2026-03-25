@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import signal
 import sys
+import threading
 import time
 
 
@@ -46,7 +47,7 @@ def run_headless(args: argparse.Namespace) -> None:
 
     print(f"加载模型：{model_path} …")
 
-    done_event   = __import__("threading").Event()
+    done_event   = threading.Event()
     load_result  = {}
 
     def on_done(success: bool, msg: str) -> None:
