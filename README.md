@@ -37,7 +37,8 @@
 | 数学渲染 | KaTeX 0.16 |
 | XSS 防护 | DOMPurify |
 | PDF 解析 | PDF.js |
-| AI 模型 | Groq（Llama 3.3 70B） |
+| 云端 AI | Groq / Claude / DeepSeek / 通义 / 智谱 / Kimi |
+| 本地 AI | llama.cpp（llama-cpp-python，支持 Metal/CUDA） |
 | 前端部署 | Cloudflare Pages |
 | 后端代理 | Cloudflare Workers |
 | 限流存储 | Cloudflare KV |
@@ -59,8 +60,209 @@
 │
 ├── worker.js               # Cloudflare Worker 后端代理
 ├── wrangler.toml           # Worker 部署配置
+├── local-proxy.js          # 本地 Ollama 代理（Node.js）
+├── llama_desktop/          # 本地 llama.cpp 桌面服务
+│   ├── main.py             # 入口（GUI 或 --headless）
+│   ├── gui.py              # Tkinter 桌面 GUI
+│   ├── server.py           # FastAPI 本地 API 服务
+│   ├── model_manager.py    # GGUF 模型加载管理
+│   ├── prompts.py          # 系统提示词
+│   └── requirements.txt
 └── README.md
 ```
+
+---
+
+## 💻 本地模型离线使用（Qwen2.5-14B + llama.cpp）
+
+> **无需任何 API Key，完全离线运行。**
+> 适合已下载 GGUF 模型文件的用户，使用 `llama_desktop` 模块直接加载模型并在本地提供 API 服务。
+
+---
+
+### 前置条件
+
+| 项目 | 要求 |
+|------|------|
+| 操作系统 | macOS 12+（Apple Silicon 原生支持 Metal GPU 加速） |
+| Python | 3.10 或更高 |
+| 内存 | 建议 16GB 以上（运行 14B Q4 模型约占用 10GB） |
+| 模型文件 | `Qwen2.5-14B-Instruct` 的任意 GGUF 量化版本 |
+
+**推荐量化版本（按内存占用排序）：**
+
+| 量化版本 | 文件大小 | 内存占用 | 质量 | 推荐场景 |
+|----------|----------|----------|------|----------|
+| `Q4_K_M` | ~9.3 GB  | ~10 GB   | ★★★★ | **首选**，16GB 内存可用 |
+| `Q5_K_M` | ~11 GB   | ~12 GB   | ★★★★★ | 质量更高，16GB 内存勉强可用 |
+| `Q8_0`   | ~15 GB   | ~16 GB   | ★★★★★ | 需要 24GB+ |
+| `Q3_K_M` | ~7.6 GB  | ~8.5 GB  | ★★★  | 内存不足时备选 |
+
+---
+
+### 第一步：将模型文件放到推荐目录
+
+`llama_desktop` 启动时会自动扫描以下路径：
+
+```
+~/models/
+~/.cache/lm-studio/models/
+```
+
+**建议操作：**
+```bash
+mkdir -p ~/models
+mv ~/Downloads/qwen2.5-14b-instruct-q4_k_m.gguf ~/models/
+```
+
+> 也可以不移动文件，启动后在 GUI 中点击「浏览」手动选择任意位置的 `.gguf` 文件。
+
+---
+
+### 第二步：安装 Python 依赖
+
+**macOS Apple Silicon（M1/M2/M3/M4）——启用 Metal GPU 加速：**
+
+```bash
+cd llama_desktop
+
+# 先安装其他依赖
+pip install fastapi uvicorn pydantic
+
+# 编译安装 llama-cpp-python，开启 Metal 加速（重要！）
+CMAKE_ARGS="-DGGML_METAL=on" pip install llama-cpp-python --no-cache-dir
+```
+
+> ⚠️ 必须带 `CMAKE_ARGS="-DGGML_METAL=on"` 编译，否则只用 CPU，速度慢约 5 倍。
+> 编译过程约 3～5 分钟，请耐心等待。
+
+**验证 Metal 是否生效：**
+```bash
+python -c "from llama_cpp import Llama; print('llama-cpp-python 安装成功')"
+```
+
+---
+
+### 第三步：启动桌面 GUI
+
+```bash
+# 在项目根目录执行
+python llama_desktop/main.py
+```
+
+启动后会弹出如下界面：
+
+```
+┌─────────────────────────────────────────┐
+│ 模型文件  [自动填充扫描到的路径] [浏览][扫描] │
+│ 服务地址  127.0.0.1   端口  8788         │
+│ GPU 层数  -1（= 全部交给 Metal）          │
+│                                          │
+│ [⚡ 加载模型 + 启动服务]  [🌐 在浏览器打开] │
+│ ● 未启动                                 │
+│ ┌──────────────────────────────────────┐ │
+│ │ 日志输出区域                          │ │
+└─────────────────────────────────────────┘
+```
+
+**操作步骤：**
+
+1. **确认模型路径**
+   GUI 启动时自动扫描 `~/models/`，若找到 `.gguf` 文件会自动填入。
+   未找到时点击「扫描」或「浏览」手动选择文件。
+
+2. **确认端口**
+   默认端口 `8788`。若被占用可改为其他值（如 `8080`）。
+
+3. **GPU 层数保持 `-1`**
+   `-1` 代表将所有层全部 offload 到 Metal GPU，速度最快。
+   若遇到内存不足报错，可改为 `20`～`35` 减少 GPU 占用。
+
+4. **点击「⚡ 加载模型 + 启动服务」**
+   日志区会显示加载进度，Q4_K_M 14B 模型首次加载约需 **10～30 秒**。
+   看到 `API 服务已启动：http://127.0.0.1:8788/api/convert` 即表示就绪。
+
+5. **点击「🌐 在浏览器打开」**
+   自动在浏览器中打开本地前端界面，即可正常使用所有功能。
+
+---
+
+### 第四步：使用前端界面
+
+浏览器打开后，界面与在线版完全相同。此时流量走向：
+
+```
+浏览器（notes-pdf/dist/index.html）
+  │  POST /api/convert
+  ▼
+llama_desktop/server.py（127.0.0.1:8788）
+  │  llama-cpp-python 推理
+  ▼
+Qwen2.5-14B-Instruct（本地 GGUF，Metal 加速）
+```
+
+> 前端默认请求 Cloudflare Worker 地址。`llama_desktop` 通过 `local-proxy` 的静态文件服务将该地址自动替换为本地地址，**无需修改任何代码**。
+> 直接双击打开 `notes-pdf/dist/index.html` 时仍会请求云端 Worker，需通过 GUI 的「在浏览器打开」按钮才能正确走本地。
+
+**性能参考（MacBook Air M4 16GB，Q4_K_M）：**
+
+| 操作 | 耗时估算 |
+|------|----------|
+| 模型加载 | 10～30 秒（首次） |
+| 笔记转换（1000 字） | 20～40 秒 |
+| PDF 总结（5000 字） | 40～90 秒 |
+| 生成速度 | 约 8～15 token/s |
+
+---
+
+### 无界面模式（headless）
+
+适合 SSH 远程或脚本自动化场景：
+
+```bash
+# 指定模型路径，后台运行
+python llama_desktop/main.py --headless \
+  --model ~/models/qwen2.5-14b-instruct-q4_k_m.gguf \
+  --port 8788
+
+# 自定义所有参数
+python llama_desktop/main.py --headless \
+  --model ~/models/qwen2.5-14b-instruct-q4_k_m.gguf \
+  --host 0.0.0.0 \   # 局域网可访问
+  --port 8788 \
+  --gpu 28            # 手动指定 GPU 层数
+```
+
+运行后按 `Ctrl+C` 停止服务。
+
+---
+
+### 常见问题
+
+**Q：点击启动后日志显示 `ggml_metal_init: failed`**
+```bash
+# 重新安装，确保 Metal 编译标志正确
+pip uninstall llama-cpp-python -y
+CMAKE_ARGS="-DGGML_METAL=on" pip install llama-cpp-python --no-cache-dir
+```
+
+**Q：报错 `Killed` 或内存不足**
+- 换用 `Q3_K_M` 量化版本（约 8.5GB）
+- 或将 GPU 层数从 `-1` 改为 `20`，减少显存占用
+
+**Q：生成速度很慢（< 3 token/s）**
+- 确认 Metal 已启用：日志中应有 `ggml_metal_init: GPU name: Apple M4`
+- 若没有该行，说明 llama-cpp-python 未编译 Metal 支持，按上方步骤重装
+
+**Q：端口 8788 已被占用**
+```bash
+# 换一个端口
+python llama_desktop/main.py --headless --model ~/models/xxx.gguf --port 8080
+```
+
+**Q：浏览器打开后仍然请求云端 Worker**
+- 必须通过 GUI 的「🌐 在浏览器打开」按钮，不能直接双击 `dist/index.html`
+- 或手动访问 `http://127.0.0.1:8788`（需本地代理服务提供静态文件）
 
 ---
 
